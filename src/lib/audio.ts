@@ -109,12 +109,21 @@ export function replyModalityOverride(
   // Negation short-circuit. "Do not reply with voice" literally CONTAINS
   // the substring "reply with voice" which would otherwise hit the
   // positive voice pattern below — so we check negations first and exit.
-  // Symmetric "no text / don't reply with text" isn't covered: it's an
-  // unlikely phrasing, and adding it just bloats the surface. Easy to
-  // bolt on if anyone asks.
+  // Symmetric for text ("no text", "don't reply with text") so users can
+  // negate either modality. If a message negates BOTH (rare — "no text
+  // and no voice"), the later mention is the user's settled intent,
+  // matching the later-wins rule used by the positive patterns below.
   const NEGATION_VOICE =
     /\b(?:no|never|don't|do\s+not)\s+(?:use\s+|reply\s+(?:with|in)\s+|respond\s+(?:with|in)\s+|send\s+(?:me\s+|a\s+)*)?voice(?:\s*(?:note|message|reply|response))?\b/;
-  if (NEGATION_VOICE.test(t)) return "text";
+  const NEGATION_TEXT =
+    /\b(?:no|never|don't|do\s+not)\s+(?:use\s+|reply\s+(?:with|in)\s+|respond\s+(?:with|in)\s+|send\s+(?:me\s+|a\s+)*)?text(?:\s*(?:reply|response|message))?\b/;
+  const negVoice = NEGATION_VOICE.exec(t);
+  const negText = NEGATION_TEXT.exec(t);
+  if (negVoice && negText) {
+    return negVoice.index > negText.index ? "text" : "voice";
+  }
+  if (negVoice) return "text";
+  if (negText) return "voice";
 
   // Patterns are anchored on reply-verbs ("reply", "respond", "answer"),
   // unmistakable shorthand ("text reply", "voice note"), or "as/in text|
