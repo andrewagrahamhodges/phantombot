@@ -334,6 +334,11 @@ describe("replyModalityOverride", () => {
     "as a voice",
     "voice reply",
     "answer with a voice note",
+    "no text please",
+    "don't use text",
+    "Do not reply with text",
+    "no text, voice please",
+    "don't reply with text",
   ])("voice directive: %s → voice", (input) => {
     expect(replyModalityOverride(input)).toBe("voice");
   });
@@ -347,6 +352,11 @@ describe("replyModalityOverride", () => {
     "I'm reading a textbook",
     "summarise this text",
     "what's the difference between text and audio formats",
+    // Regression: NEGATION_TEXT must not match "no text message(s)" — the
+    // positive textPatterns deliberately exclude "text message" (SMS), so
+    // negating it shouldn't flip routing to voice either.
+    "no text messages today please",
+    "don't send any text message to john",
     "",
     undefined,
   ])("no directive: %p → undefined", (input) => {
@@ -365,8 +375,21 @@ describe("replyModalityOverride", () => {
     ).toBe("voice");
   });
 
+  test("both negations in one message — later one wins (voice negated last → text)", () => {
+    expect(
+      replyModalityOverride("no text — actually don't use voice either"),
+    ).toBe("text");
+  });
+
+  test("both negations in one message — later one wins (text negated last → voice)", () => {
+    expect(
+      replyModalityOverride("no voice — actually don't reply with text"),
+    ).toBe("voice");
+  });
+
   test("case-insensitive", () => {
     expect(replyModalityOverride("REPLY IN TEXT")).toBe("text");
     expect(replyModalityOverride("Send A Voice Note")).toBe("voice");
+    expect(replyModalityOverride("NO TEXT PLEASE")).toBe("voice");
   });
 });
