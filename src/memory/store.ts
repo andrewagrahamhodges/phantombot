@@ -1,8 +1,13 @@
 /**
  * Memory store. SQLite-backed via bun:sqlite (no native compile, no extra deps).
  *
- * Schema is one table:
+ * Schema is two tables:
  *   turns(id, persona, conversation, role, text, created_at)
+ *   capture_log(id, persona, conversation, tags, created_at)
+ *
+ * `capture_log` records every `phantombot memory capture` invocation —
+ * it gives the otherwise-invisible capture protocol a queryable trace
+ * and backs the mechanical "N turns without a capture" nudge.
  *
  * Turns are scoped by (persona, conversation). The conversation key is
  * 'cli:default' for v1 — phantombot is a single-operator CLI tool, so all
@@ -36,6 +41,13 @@ export interface AppendTurnInput {
   text: string;
 }
 
+export interface AppendCaptureInput {
+  persona: string;
+  conversation: string;
+  /** Tags applied to this capture (already validated by the caller). */
+  tags: string[];
+}
+
 export interface MemoryStore {
   /** Persist one turn. Auto-stamps created_at to "now" UTC. */
   appendTurn(turn: AppendTurnInput): Promise<void>;
@@ -49,6 +61,40 @@ export interface MemoryStore {
   recentTurnsForDisplay(persona: string, n: number): Promise<Turn[]>;
   /** Delete all turns for a (persona, conversation) pair. Used by /reset. */
   deleteConversation(persona: string, conversation: string): Promise<number>;
+  /** Record one `memory capture` invocation. Auto-stamps created_at UTC. */
+  appendCapture(input: AppendCaptureInput): Promise<void>;
+  /**
+   * ISO timestamp of the most recent capture in (persona, conversation),
+   * or undefined if this pair has never captured.
+   */
+  lastCaptureAt(
+    persona: string,
+    conversation: string,
+  ): Promise<string | undefined>;
+  /**
+   * Count `role = 'user'` turns in (persona, conversation) with
+   * `created_at > since`. Used by the mechanical capture nudge.
+   */
+  countUserTurnsSince(
+    persona: string,
+    conversation: string,
+    since: string,
+  ): Promise<number>;
+  /**
+   * Count capture_log rows for one persona with `created_at >= since`.
+   * Used by `doctor` to detect a fully dry capture day.
+   */
+  countCapturesSince(persona: string, since: string): Promise<number>;
+  /**
+   * Count `role = 'user'` turns for one persona, across conversations
+   * matching `conversationPrefix` (SQL LIKE-escaped), with
+   * `created_at >= since`. Used by `doctor`'s capture-health check.
+   */
+  countUserTurnsForPersonaSince(
+    persona: string,
+    conversationPrefix: string,
+    since: string,
+  ): Promise<number>;
   /** Close the underlying SQLite connection. Safe to call once; idempotent thereafter. */
   close(): Promise<void>;
 }
@@ -66,6 +112,16 @@ CREATE INDEX IF NOT EXISTS idx_turns_persona_conv_time
   ON turns (persona, conversation, created_at);
 CREATE INDEX IF NOT EXISTS idx_turns_persona_time
   ON turns (persona, created_at);
+
+CREATE TABLE IF NOT EXISTS capture_log (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  persona      TEXT NOT NULL,
+  conversation TEXT NOT NULL,
+  tags         TEXT NOT NULL,
+  created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_capture_persona_conv_time
+  ON capture_log (persona, conversation, created_at);
 `;
 
 interface RawDisplayRow {
@@ -82,6 +138,10 @@ class SqliteMemoryStore implements MemoryStore {
   private recentStmt;
   private recentDisplayStmt;
   private deleteStmt;
+  private appendCaptureStmt;
+  private lastCaptureStmt;
+  private countTurnsSinceStmt;
+  private countCapturesSinceStmt;
   private closed = false;
 
   constructor(private db: Database) {
@@ -110,6 +170,23 @@ class SqliteMemoryStore implements MemoryStore {
     );
     this.deleteStmt = db.prepare(
       "DELETE FROM turns WHERE persona = ? AND conversation = ?",
+    );
+    this.appendCaptureStmt = db.prepare(
+      "INSERT INTO capture_log (persona, conversation, tags, created_at) VALUES (?, ?, ?, ?)",
+    );
+    this.lastCaptureStmt = db.prepare(
+      `SELECT created_at FROM capture_log
+       WHERE persona = ? AND conversation = ?
+       ORDER BY created_at DESC, id DESC LIMIT 1`,
+    );
+    this.countTurnsSinceStmt = db.prepare(
+      `SELECT COUNT(*) AS n FROM turns
+       WHERE persona = ? AND conversation = ?
+         AND role = 'user' AND created_at > ?`,
+    );
+    this.countCapturesSinceStmt = db.prepare(
+      `SELECT COUNT(*) AS n FROM capture_log
+       WHERE persona = ? AND created_at >= ?`,
     );
   }
 
@@ -144,6 +221,61 @@ class SqliteMemoryStore implements MemoryStore {
       text: r.text,
       createdAt: new Date(r.created_at),
     }));
+  }
+
+  async appendCapture(input: AppendCaptureInput): Promise<void> {
+    this.appendCaptureStmt.run(
+      input.persona,
+      input.conversation,
+      input.tags.join(","),
+      new Date().toISOString(),
+    );
+  }
+
+  async lastCaptureAt(
+    persona: string,
+    conversation: string,
+  ): Promise<string | undefined> {
+    const row = this.lastCaptureStmt.get(persona, conversation) as
+      | { created_at: string }
+      | undefined;
+    return row?.created_at;
+  }
+
+  async countUserTurnsSince(
+    persona: string,
+    conversation: string,
+    since: string,
+  ): Promise<number> {
+    const row = this.countTurnsSinceStmt.get(persona, conversation, since) as {
+      n: number;
+    };
+    return row.n;
+  }
+
+  async countCapturesSince(persona: string, since: string): Promise<number> {
+    const row = this.countCapturesSinceStmt.get(persona, since) as {
+      n: number;
+    };
+    return row.n;
+  }
+
+  async countUserTurnsForPersonaSince(
+    persona: string,
+    conversationPrefix: string,
+    since: string,
+  ): Promise<number> {
+    // Escape LIKE wildcards in the caller-supplied prefix, then anchor it
+    // with a trailing % so `telegram:` matches `telegram:123` etc.
+    const escaped = conversationPrefix.replace(/[\\%_]/g, "\\$&");
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM turns
+         WHERE persona = ? AND role = 'user' AND created_at >= ?
+           AND conversation LIKE ? ESCAPE '\\'`,
+      )
+      .get(persona, since, `${escaped}%`) as { n: number };
+    return row.n;
   }
 
   async close(): Promise<void> {
