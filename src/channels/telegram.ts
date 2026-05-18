@@ -1109,10 +1109,25 @@ async function processChatMessage(
     refreshIndicator();
   };
 
+  // Mechanical capture nudge: every CAPTURE_NUDGE_INTERVAL user turns
+  // without a `memory capture`, append a reminder to the system-prompt
+  // suffix. Only for real `telegram:*` conversations — never tick:/system:.
+  // runTurn appends this incoming message to `turns` only AFTER the turn,
+  // so we count prior user turns + 1 to land the nudge on the Nth turn.
+  const conversationKey = `telegram:${msg.chatId}`;
+  let captureNudge: string | undefined;
+  if (conversationKey.startsWith("telegram:")) {
+    captureNudge = await captureNudgeForTurn(
+      input.memory,
+      input.persona,
+      conversationKey,
+    );
+  }
+
   try {
     for await (const chunk of runTurn({
       persona: input.persona,
-      conversation: `telegram:${msg.chatId}`,
+      conversation: conversationKey,
       userMessage: msg.text,
       agentDir: input.agentDir,
       harnesses,
@@ -1130,9 +1145,17 @@ async function processChatMessage(
       // Living at the channel layer (not in persona files) keeps these
       // rules from leaking into CLI/nightly turns, where verbosity is
       // fine and the user isn't on a phone.
-      systemPromptSuffix: willReplyWithVoice
-        ? `${TELEGRAM_REPLY_INSTRUCTION}\n\n${VOICE_REPLY_INSTRUCTION}`
-        : TELEGRAM_REPLY_INSTRUCTION,
+      // The mechanical capture nudge (when due) stacks last so it is
+      // the freshest standing instruction the harness sees this turn —
+      // exactly the salience boost weak harnesses need.
+      systemPromptSuffix: [
+        willReplyWithVoice
+          ? `${TELEGRAM_REPLY_INSTRUCTION}\n\n${VOICE_REPLY_INSTRUCTION}`
+          : TELEGRAM_REPLY_INSTRUCTION,
+        captureNudge,
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
       // Pre-tool narration: ON for text-out (the user sees streamed
       // text as it lands, so a "checking your calendar..." sentence
       // before a tool call usefully fills the silence). OFF for
@@ -1401,6 +1424,68 @@ sentences and ask the user to confirm or adjust:
 Telegram round-trips are slow and tokens aren't free — confirming up
 front beats producing the wrong thing minutes later. For
 straightforward questions, just answer.`;
+
+/**
+ * Mechanical capture nudge — every {@link CAPTURE_NUDGE_INTERVAL} user
+ * turns without a `memory capture`, the dispatch appends this to the
+ * system-prompt suffix. Pure turn counter; no LLM decides whether to
+ * nudge. Counteracts long-context dilution on weak harnesses that
+ * weight standing instructions less.
+ */
+export const CAPTURE_NUDGE_INTERVAL = 30;
+
+export const CAPTURE_NUDGE_TEXT =
+  `${CAPTURE_NUDGE_INTERVAL} turns without a memory capture in this ` +
+  `conversation. If a decision, lesson, person fact or commitment came ` +
+  `up, capture it now with \`phantombot memory capture\`. If nothing is ` +
+  `worth keeping, carry on — no capture is a valid answer.`;
+
+/**
+ * Decide whether to append the capture nudge for this turn.
+ *
+ * Counts `role = 'user'` turns since the last capture in this
+ * (persona, conversation) — so any capture resets the counter for free
+ * and the nudge re-fires at 2x, 3x, … if still dry. State lives entirely
+ * in `memory.sqlite`, shared by the long-running phantombot process and
+ * the short-lived `memory capture` CLI call, so the two stay in sync.
+ *
+ * The current incoming user message is NOT yet persisted to `turns`
+ * (runTurn appends it only after the turn completes), so the effective
+ * turn index is `countUserTurnsSince(...) + 1`. The nudge fires when
+ * that effective index is a positive multiple of `interval` — i.e. on
+ * the 30th, 60th, … dry turn.
+ *
+ * Only meaningful for real `telegram:*` conversations — the caller is
+ * responsible for that gate.
+ */
+export async function captureNudgeForTurn(
+  memory: MemoryStore,
+  persona: string,
+  conversation: string,
+  interval = CAPTURE_NUDGE_INTERVAL,
+): Promise<string | undefined> {
+  try {
+    const since =
+      (await memory.lastCaptureAt(persona, conversation)) ??
+      "1970-01-01T00:00:00.000Z";
+    const priorTurns = await memory.countUserTurnsSince(
+      persona,
+      conversation,
+      since,
+    );
+    // +1 for the current message, not yet written to `turns`.
+    const effectiveTurn = priorTurns + 1;
+    if (effectiveTurn > 0 && effectiveTurn % interval === 0) {
+      return CAPTURE_NUDGE_TEXT;
+    }
+  } catch (e) {
+    // A nudge is a nice-to-have — never let a counter query fail a turn.
+    log.warn("telegram: capture nudge check failed", {
+      error: (e as Error).message,
+    });
+  }
+  return undefined;
+}
 
 /**
  * Voice-only overlay, stacked on top of TELEGRAM_REPLY_INSTRUCTION
