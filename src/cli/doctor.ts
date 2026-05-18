@@ -266,10 +266,12 @@ export default defineCommand({
       type: "string",
       description: "Persona name (default: configured default).",
     },
-    "no-repair": {
+    repair: {
       type: "boolean",
-      description: "Only report; do not spawn a background nightly --resume.",
-      default: false,
+      description:
+        "Spawn a background `nightly --resume` when repair is warranted. " +
+        "Pass --no-repair to only report.",
+      default: true,
     },
     json: {
       type: "boolean",
@@ -280,7 +282,7 @@ export default defineCommand({
   async run({ args }) {
     process.exitCode = await runDoctor({
       persona: args.persona ? String(args.persona) : undefined,
-      repair: !args["no-repair"],
+      repair: args.repair !== false,
       json: Boolean(args.json),
     });
   },
