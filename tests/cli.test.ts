@@ -21,6 +21,7 @@ describe("phantombot CLI dispatcher", () => {
     const names = Object.keys(subs).sort();
     expect(names).toEqual([
       "ask",
+      "doctor",
       "embedding",
       "env",
       "harness",

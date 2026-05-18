@@ -17,7 +17,6 @@ import { type Config, loadConfig, personaDir } from "../config.ts";
 import { buildHarnessChain } from "../harnesses/buildChain.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { log } from "../lib/logger.ts";
-import { shouldRunCatchupNightly } from "../lib/nightly.ts";
 import { healDefaultPersonaIfBroken } from "../lib/personaDefault.ts";
 import { logsCommand, statusCommand } from "../lib/platform.ts";
 import {
@@ -28,7 +27,7 @@ import {
 import { notifyPostRestartIfPending } from "../lib/updateNotify.ts";
 import { openMemoryStore } from "../memory/store.ts";
 import { VERSION } from "../version.ts";
-import { runNightly } from "./nightly.ts";
+import { runDoctor } from "./doctor.ts";
 
 export interface RunInput {
   config?: Config;
@@ -128,21 +127,20 @@ export async function runRun(input: RunInput = {}): Promise<number> {
   );
   out.write("Ctrl-C to stop.\n");
 
-  // Catch-up nightly: if the machine was off during the 02:00 window
-  // and the last run is >24h stale, fire it now in the background.
-  // Don't await — must not slow startup.
-  if (await shouldRunCatchupNightly(agentDir)) {
-    log.info("run: nightly stale, starting background catch-up");
-    runNightly({ config, persona, out, err }).then(
-      (code) => {
-        if (code !== 0) log.warn("run: catch-up nightly exited", { code });
-      },
-      (e: unknown) =>
-        log.error("run: catch-up nightly threw", {
-          error: (e as Error).message,
-        }),
-    );
-  }
+  // Startup catch-up: `doctor` checks for a stale, failed, or partially
+  // checkpointed nightly and, if found, spawns a detached
+  // `nightly --resume` that picks up from the last good stage. This
+  // covers machines powered off during the 02:00 window. Don't await —
+  // doctor's repair is a detached child, so this returns immediately.
+  runDoctor({ config, persona, out, err }).then(
+    (code) => {
+      if (code !== 0) log.info("run: startup doctor flagged an issue", { code });
+    },
+    (e: unknown) =>
+      log.error("run: startup doctor threw", {
+        error: (e as Error).message,
+      }),
+  );
 
   const ac = new AbortController();
   const onSig = () => ac.abort();

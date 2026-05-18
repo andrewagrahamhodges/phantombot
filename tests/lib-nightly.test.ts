@@ -5,10 +5,17 @@ import { join } from "node:path";
 import {
   buildNightlyPrompt,
   buildNightlyPromptForPersona,
+  buildNightlyStagePrompt,
   CATCHUP_WINDOW_MS,
+  clearNightlyProgress,
+  loadNightlyProgress,
   loadNightlyState,
+  NIGHTLY_STAGES,
+  type NightlyProgress,
   nightlyConversationKey,
   nightlyStatePath,
+  pendingNightlyStages,
+  saveNightlyProgress,
   saveNightlyState,
   shouldRunCatchupNightly,
 } from "../src/lib/nightly.ts";
@@ -187,5 +194,103 @@ describe("buildNightlyPromptForPersona — override", () => {
       "2026-05-02",
     );
     expect(built).toBe("Hey robbie, today is 2026-05-02. Do the thing.");
+  });
+});
+
+describe("nightly checkpoint — progress file", () => {
+  test("loadNightlyProgress returns null when no file exists", async () => {
+    expect(await loadNightlyProgress(workdir)).toBeNull();
+  });
+
+  test("save then load round-trips", async () => {
+    const progress: NightlyProgress = {
+      date: "2026-05-18",
+      started_at: "2026-05-18T02:00:00.000Z",
+      updated_at: "2026-05-18T02:03:00.000Z",
+      completed_stages: ["essence", "promote"],
+      status: "in_progress",
+    };
+    await saveNightlyProgress(workdir, progress);
+    expect(await loadNightlyProgress(workdir)).toEqual(progress);
+  });
+
+  test("clearNightlyProgress removes the file", async () => {
+    await saveNightlyProgress(workdir, {
+      date: "2026-05-18",
+      started_at: "x",
+      updated_at: "x",
+      completed_stages: [],
+      status: "in_progress",
+    });
+    await clearNightlyProgress(workdir);
+    expect(await loadNightlyProgress(workdir)).toBeNull();
+  });
+
+  test("clearNightlyProgress is a no-op when there is no file", async () => {
+    await clearNightlyProgress(workdir); // must not throw
+    expect(await loadNightlyProgress(workdir)).toBeNull();
+  });
+});
+
+describe("pendingNightlyStages", () => {
+  test("returns every stage when resume is false", async () => {
+    expect(await pendingNightlyStages(workdir, "2026-05-18", false)).toEqual([
+      ...NIGHTLY_STAGES,
+    ]);
+  });
+
+  test("returns every stage when resume is true but no checkpoint", async () => {
+    expect(await pendingNightlyStages(workdir, "2026-05-18", true)).toEqual([
+      ...NIGHTLY_STAGES,
+    ]);
+  });
+
+  test("skips completed stages when checkpoint matches today", async () => {
+    await saveNightlyProgress(workdir, {
+      date: "2026-05-18",
+      started_at: "x",
+      updated_at: "x",
+      completed_stages: ["essence", "promote"],
+      status: "partial",
+    });
+    expect(await pendingNightlyStages(workdir, "2026-05-18", true)).toEqual([
+      "kb",
+      "compress",
+      "state",
+    ]);
+  });
+
+  test("ignores a stale checkpoint from a different date", async () => {
+    await saveNightlyProgress(workdir, {
+      date: "2026-05-17",
+      started_at: "x",
+      updated_at: "x",
+      completed_stages: ["essence", "promote", "kb"],
+      status: "partial",
+    });
+    expect(await pendingNightlyStages(workdir, "2026-05-18", true)).toEqual([
+      ...NIGHTLY_STAGES,
+    ]);
+  });
+});
+
+describe("buildNightlyStagePrompt", () => {
+  test("embeds persona, date and the isolation/checkpoint notes", () => {
+    const p = buildNightlyStagePrompt("robbie", "2026-05-18", "essence");
+    expect(p).toContain("persona 'robbie'");
+    expect(p).toContain("2026-05-18");
+    expect(p).toContain("CHECKPOINTED");
+    expect(p).toContain("system:nightly:2026-05-18");
+  });
+
+  test("each stage carries its own distinct instruction body", () => {
+    const bodies = NIGHTLY_STAGES.map((s) =>
+      buildNightlyStagePrompt("robbie", "2026-05-18", s),
+    );
+    expect(bodies[0]).toContain("DAY ESSENCE");
+    expect(bodies[1]).toContain("PROMOTE TO DRAWERS");
+    expect(bodies[2]).toContain("FEED THE KB");
+    expect(bodies[3]).toContain("COMPRESS MEMORY.md");
+    expect(bodies[4]).toContain("STATE REPORT");
   });
 });

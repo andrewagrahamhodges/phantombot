@@ -10,10 +10,11 @@
  *   run             - run the bot in the foreground (Ctrl-C to stop)
  *   ask             - one-shot prompt through the persona + harness chain
  *
- * Dev/debug commands (chat, doctor, history, list-personas, etc.) were
- * removed as part of the v0.1 surface lock. `ask` was reintroduced for
- * external programs that want Robbie's brain as a non-interactive tool
- * (e.g. the Twilio voice-agent's `askRobbie` relay).
+ * Dev/debug commands (chat, history, list-personas, etc.) were removed
+ * as part of the v0.1 surface lock. `ask` was reintroduced for external
+ * programs that want Robbie's brain as a non-interactive tool (e.g. the
+ * Twilio voice-agent's `askRobbie` relay). `doctor` was reintroduced as
+ * the memory-subsystem health check + nightly auto-repair.
  */
 
 import { defineCommand } from "citty";
@@ -30,6 +31,7 @@ import memoryCmd from "./memory.ts";
 import embeddingCmd from "./embedding.ts";
 import heartbeatCmd from "./heartbeat.ts";
 import nightlyCmd from "./nightly.ts";
+import doctorCmd from "./doctor.ts";
 import envCmd from "./env.ts";
 import notifyCmd from "./notify.ts";
 import taskCmd from "./task.ts";
@@ -59,6 +61,7 @@ export const mainCommand = defineCommand({
     notify: notifyCmd,
     heartbeat: heartbeatCmd,
     nightly: nightlyCmd,
+    doctor: doctorCmd,
     task: taskCmd,
     tick: tickCmd,
     update: updateCmd,
