@@ -16,18 +16,23 @@
  *                              unconditionally so the harness can write to it)
  *   phantombot memory index [--rebuild]
  *                              rebuild the FTS5 index (incremental by default)
+ *   phantombot memory capture "<text>" --tag <tag> [--tag <tag> ...]
+ *                              append a tagged line to today's daily file
+ *                              and record the capture in capture_log
  */
 
 import { defineCommand } from "citty";
 import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { appendFile, mkdir } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
 import { type Config, loadConfig, personaDir } from "../config.ts";
 import { defaultEmbedder, runEmbedJob } from "../lib/embedJob.ts";
 import { geminiEmbed } from "../lib/geminiEmbed.ts";
+import { TAG_TO_DRAWER } from "../lib/heartbeat.ts";
 import type { WriteSink } from "../lib/io.ts";
 import { MemoryIndex, type Scope } from "../lib/memoryIndex.ts";
+import { openMemoryStore } from "../memory/store.ts";
 
 function indexPath(_config: Config, persona: string): string {
   // One index file per persona — easier to rebuild a single persona without
@@ -286,6 +291,98 @@ export async function runMemoryIndex(
   return 0;
 }
 
+export interface RunCaptureInput extends RunMemoryInput {
+  text: string;
+  tags: string[];
+  persona?: string;
+  /** Conversation key the capture belongs to. Default: cli:default. */
+  conversation?: string;
+  /** Override "today" for testing. ISO date YYYY-MM-DD. */
+  date?: string;
+  /** Override "now" for the line timestamp (testing). */
+  now?: Date;
+}
+
+/**
+ * `phantombot memory capture` — append one tagged line per tag to today's
+ * daily file and record the capture in `capture_log`.
+ *
+ * Gives the capture protocol the same observable shape every other
+ * harness-facing tool has: a command, a log line, an exit code. The line
+ * leads with the tag (`- [decision] … · 09:34Z`) so the heartbeat
+ * promotion regex matches and the timestamp lands at the end where it
+ * won't break the `[a-z]+` tag capture.
+ */
+export async function runMemoryCapture(
+  input: RunCaptureInput,
+): Promise<number> {
+  const out = input.out ?? process.stdout;
+  const err = input.err ?? process.stderr;
+  const config = input.config ?? (await loadConfig());
+  const { persona, dir } = resolvePersonaDir(config, input.persona);
+
+  if (!existsSync(dir)) {
+    err.write(`persona '${persona}' not found at ${dir}\n`);
+    return 2;
+  }
+
+  const text = input.text.trim();
+  if (text.length === 0) {
+    err.write("memory capture: empty text\n");
+    return 2;
+  }
+
+  const tags = input.tags.map((t) => t.trim().toLowerCase()).filter(Boolean);
+  if (tags.length === 0) {
+    err.write("memory capture: at least one --tag is required\n");
+    return 2;
+  }
+  for (const tag of tags) {
+    if (!TAG_TO_DRAWER[tag]) {
+      err.write(
+        `memory capture: unknown tag '${tag}'. ` +
+          `Valid tags: ${Object.keys(TAG_TO_DRAWER).sort().join(", ")}\n`,
+      );
+      return 2;
+    }
+  }
+
+  const now = input.now ?? new Date();
+  const date = input.date ?? now.toISOString().slice(0, 10);
+  const memDir = join(dir, "memory");
+  await mkdir(memDir, { recursive: true });
+  const dailyPath = join(memDir, `${date}.md`);
+
+  // Create today's daily file with a one-line header if it doesn't exist.
+  if (!existsSync(dailyPath)) {
+    await Bun.write(dailyPath, `# ${date}\n`);
+  }
+
+  // HH:MMZ — appended at the END of the line so the heartbeat tag regex
+  // (/^\s*-?\s*\[([a-z]+)\]\s+(.+)$/i) still matches.
+  const stamp = `${now.toISOString().slice(11, 16)}Z`;
+  let block = "";
+  for (const tag of tags) {
+    block += `- [${tag}] ${text} · ${stamp}\n`;
+  }
+  await appendFile(dailyPath, block, "utf8");
+
+  // Record the capture so the nudge counter and `doctor` can see it.
+  const conversation = input.conversation ?? "cli:default";
+  const store = await openMemoryStore(config.memoryDbPath);
+  try {
+    await store.appendCapture({ persona, conversation, tags });
+  } finally {
+    await store.close();
+  }
+
+  out.write(
+    `memory capture: tags=${tags.join(",")} conv=${conversation} ` +
+      `persona=${persona} ok\n`,
+  );
+  return 0;
+}
+
 // ---------------------------------------------------------------------------
 // Citty subcommand wiring
 // ---------------------------------------------------------------------------
@@ -373,11 +470,50 @@ const indexCmd = defineCommand({
   },
 });
 
+const captureCmd = defineCommand({
+  meta: {
+    name: "capture",
+    description:
+      "Append a tagged line to today's daily file and record the capture (decision | lesson | person | commitment).",
+  },
+  args: {
+    text: {
+      type: "positional",
+      description: "The thing worth keeping.",
+      required: true,
+    },
+    tag: {
+      type: "string",
+      description:
+        "Tag (decision | lesson | person | commitment). Repeatable for multi-tag.",
+      required: true,
+    },
+    persona: { type: "string", description: "Persona name." },
+    conversation: {
+      type: "string",
+      description: "Conversation key this capture belongs to (default cli:default).",
+    },
+  },
+  async run({ args }) {
+    // citty collapses repeated --tag into a string OR string[]; normalise.
+    const rawTag = args.tag as unknown;
+    const tags = Array.isArray(rawTag)
+      ? rawTag.map(String)
+      : [String(rawTag)];
+    process.exitCode = await runMemoryCapture({
+      text: String(args.text),
+      tags,
+      persona: args.persona ? String(args.persona) : undefined,
+      conversation: args.conversation ? String(args.conversation) : undefined,
+    });
+  },
+});
+
 export default defineCommand({
   meta: {
     name: "memory",
     description:
-      "Memory tools the harness can call from its Bash loop (search, get, list, today, index).",
+      "Memory tools the harness can call from its Bash loop (search, get, list, today, index, capture).",
   },
   subCommands: {
     search: searchCmd,
@@ -385,5 +521,6 @@ export default defineCommand({
     list: listCmd,
     today: todayCmd,
     index: indexCmd,
+    capture: captureCmd,
   },
 });

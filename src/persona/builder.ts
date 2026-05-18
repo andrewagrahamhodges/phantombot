@@ -91,6 +91,7 @@ commands you can run from your Bash tool:
   phantombot memory get <persona-relative-path>   # cat a file
   phantombot memory list <persona-relative-dir>   # ls a dir
   phantombot memory index [--rebuild]             # refresh search index
+  phantombot memory capture "<text>" --tag <tag>  # record a tagged note
 
 Layout (relative to your working dir):
 
@@ -110,12 +111,19 @@ Two hard rules — apply on every nontrivial task:
    first. If memory or KB has prior knowledge, use it. Investigate
    from scratch only if neither found anything.
 
-2. CAPTURE AS YOU GO. Decisions / lessons / commitments go in today's
-   daily file (\`phantombot memory today\` returns the path) — tag them
-   with \`[decision]\`, \`[lesson]\`, \`[person]\`, or \`[commitment]\` so
-   the heartbeat (every 30 min) and nightly cycle can promote them
-   to the right drawer. KB-worthy thoughts go in
-   \`kb/inbox/<short-name>.md\`. The nightly cycle files them later.
+2. CAPTURE AS YOU GO. When a decision, lesson, person fact, or
+   commitment comes up, record it with:
+
+     phantombot memory capture "<the thing worth keeping>" --tag <tag>
+
+   where \`<tag>\` is \`decision\`, \`lesson\`, \`person\`, or
+   \`commitment\` (repeat \`--tag\` for more than one). This appends a
+   tagged line to today's daily file so the heartbeat (every 30 min)
+   and nightly cycle promote it to the right drawer — and logs the
+   capture so a missed day is visible rather than silent. KB-worthy
+   thoughts go in \`kb/inbox/<short-name>.md\`; the nightly cycle files
+   them later. If nothing is worth keeping, that's fine — no capture
+   is a valid answer.
 
 The heartbeat is mechanical (no LLM). The nightly is cognitive — that's
 when KB notes get created or updated based on what you captured during

@@ -43,7 +43,13 @@ export interface HeartbeatResult {
   updateCheck?: CheckAndNotifyOnceResult;
 }
 
-const TAG_TO_DRAWER: Record<string, string> = {
+/**
+ * Tag → drawer mapping. Both singular and plural spellings are accepted
+ * so the heartbeat promotion and `phantombot memory capture` agree on
+ * exactly the same vocabulary. Exported so the CLI validates against the
+ * single source of truth.
+ */
+export const TAG_TO_DRAWER: Record<string, string> = {
   decision: "memory/decisions.md",
   decisions: "memory/decisions.md",
   lesson: "memory/lessons.md",
